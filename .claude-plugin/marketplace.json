@@ -1,19 +1,23 @@
 {
-  "name": "honcho",
+  "name": "honcho-local",
   "owner": {
     "name": "Plastic Labs",
     "email": "hello@plasticlabs.ai"
   },
   "metadata": {
-    "description": "Honcho plugins for Claude Code - memory, development tools, and more",
-    "version": "0.2.11"
+    "description": "LOCAL FORK \u2014 upstream honcho + message-upload redaction (PR #120)",
+    "version": "0.3.1-redact.1"
   },
   "plugins": [
     {
       "name": "honcho",
-      "source": { "source": "npm", "package": "@honcho-ai/claude-honcho" },
-      "description": "Persistent memory for Claude Code sessions using Honcho",
-      "keywords": ["memory", "context", "persistence"],
+      "source": "./plugins/honcho/.stage",
+      "description": "Persistent memory for Claude Code sessions using Honcho [local fork: redacts user/assistant uploads]",
+      "keywords": [
+        "memory",
+        "context",
+        "persistence"
+      ],
       "strict": false
     },
     {
@@ -21,7 +25,11 @@
       "source": "./plugins/honcho-dev",
       "description": "Skills for building AI applications with the Honcho SDK",
       "version": "0.2.4",
-      "keywords": ["sdk", "development", "migration"],
+      "keywords": [
+        "sdk",
+        "development",
+        "migration"
+      ],
       "strict": false
     }
   ]
