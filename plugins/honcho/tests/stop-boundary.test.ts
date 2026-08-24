@@ -52,4 +52,24 @@ describe("getCurrentTurnAssistantMessages segment boundaries", () => {
     const path = transcript([toolResult, msgA]);
     expect(getCurrentTurnAssistantMessages(path)).toEqual([]);
   });
+
+  test("re-emitted identical assistant line is collected once", () => {
+    const dup = { type: "assistant", timestamp: "t1", message: { id: "m1", content: [{ type: "text", text: "narration A" }] } };
+    const path = transcript([prompt, dup, dup, msgB]);
+    expect(getCurrentTurnAssistantMessages(path).map((b) => b.text)).toEqual(["narration A", "narration B"]);
+  });
+
+  test("same message id with different text blocks keeps both", () => {
+    const part1 = { type: "assistant", timestamp: "t1", message: { id: "m1", content: [{ type: "text", text: "part one" }] } };
+    const part2 = { type: "assistant", timestamp: "t1", message: { id: "m1", content: [{ type: "text", text: "part two" }] } };
+    const path = transcript([prompt, part1, part2]);
+    expect(getCurrentTurnAssistantMessages(path).map((b) => b.text)).toEqual(["part one", "part two"]);
+  });
+
+  test("identical text in different turns of one segment keeps both", () => {
+    const okA = { type: "assistant", timestamp: "t1", message: { id: "m1", content: [{ type: "text", text: "ok" }] } };
+    const okB = { type: "assistant", timestamp: "t2", message: { id: "m2", content: [{ type: "text", text: "ok" }] } };
+    const path = transcript([prompt, okA, toolResult, okB]);
+    expect(getCurrentTurnAssistantMessages(path).map((b) => b.text)).toEqual(["ok", "ok"]);
+  });
 });
