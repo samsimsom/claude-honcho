@@ -4,7 +4,7 @@ import { renderSessionStart } from "../injection.js";
 import {
   setCachedSessionId,
   resetMessageCount,
-  setClaudeInstanceId,
+  setInstanceIdForCwd,
   getCachedGitState,
   setCachedGitState,
   detectGitChanges,
@@ -63,10 +63,11 @@ export async function handleSessionStart(): Promise<void> {
   const cwd = hookInput.workspace_roots?.[0] || hookInput.cwd || process.cwd();
   const claudeInstanceId = hookInput.session_id;
 
-  // Store Claude's instance ID for parallel session support
-  // Global write kept for backward compat (post-tool-use, MCP server, etc.)
+  // Store Claude's instance ID for parallel session support, scoped to this cwd.
+  // Written before the API calls below so callers without hook input (the MCP
+  // server) can resolve it during the window before setCachedSessionId() lands.
   if (claudeInstanceId) {
-    setClaudeInstanceId(claudeInstanceId);
+    setInstanceIdForCwd(cwd, claudeInstanceId);
   }
 
   // Set log context early so all logs include cwd/session

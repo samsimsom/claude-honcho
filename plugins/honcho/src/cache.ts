@@ -22,7 +22,6 @@ interface IdCache {
   workspace?: { name: string; id: string };
   peers?: Record<string, string>; // peerName -> peerId
   sessions?: Record<string, { name: string; id: string; updatedAt: string; instanceId?: string }>; // cwd -> session info
-  claudeInstanceId?: string; // DEPRECATED: use per-cwd instanceId in sessions map instead
 }
 
 export function loadIdCache(): IdCache {
@@ -93,22 +92,33 @@ export function getLastActiveCwd(): string | null {
   return latest?.cwd || null;
 }
 
-// Claude instance tracking for parallel session support
-export function getClaudeInstanceId(): string | null {
-  const cache = loadIdCache();
-  return cache.claudeInstanceId || null;
-}
-
-export function setClaudeInstanceId(instanceId: string): void {
-  const cache = loadIdCache();
-  cache.claudeInstanceId = instanceId;
-  saveIdCache(cache);
-}
+// Claude instance tracking for parallel session support.
+// Always per-cwd: a single machine-global field is last-writer-wins across every
+// concurrent session, which is the same class of bug as the cwd race (#38).
 
 /** Get the instance ID stored for a specific cwd (scoped, no cross-session collision) */
 export function getInstanceIdForCwd(cwd: string): string | null {
   const cache = loadIdCache();
   return cache.sessions?.[cwd]?.instanceId ?? null;
+}
+
+/**
+ * Record a cwd's instance ID without disturbing its cached session name/id.
+ * Called at session start, before the session's own id is known, so that
+ * callers with no hook input (the MCP server) can resolve the right instance
+ * during the window before setCachedSessionId() lands.
+ */
+export function setInstanceIdForCwd(cwd: string, instanceId: string): void {
+  const cache = loadIdCache();
+  if (!cache.sessions) cache.sessions = {};
+  const existing = cache.sessions[cwd];
+  cache.sessions[cwd] = {
+    name: existing?.name ?? "",
+    id: existing?.id ?? "",
+    updatedAt: new Date().toISOString(),
+    instanceId,
+  };
+  saveIdCache(cache);
 }
 
 // ============================================

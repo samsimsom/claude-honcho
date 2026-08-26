@@ -3,7 +3,7 @@ import { join, basename, dirname, resolve, sep } from "path";
 import { fileURLToPath } from "url";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { captureGitState } from "./git.js";
-import { getInstanceIdForCwd, getClaudeInstanceId } from "./cache.js";
+import { getInstanceIdForCwd } from "./cache.js";
 
 function sanitizeForSessionName(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9-_]/g, "-");
@@ -831,8 +831,10 @@ export function getSessionName(cwd: string, instanceId?: string): string {
   }
   let resolvedInstanceId: string | undefined;
   if (strategy === "chat-instance") {
-    // Prefer explicit instanceId > per-cwd cache > global cache (legacy)
-    resolvedInstanceId = instanceId || getInstanceIdForCwd(cwd) || getClaudeInstanceId() || undefined;
+    // Explicit instanceId from the caller's own hook input, else this cwd's
+    // recorded instance. Never a machine-global value: that resolves to whichever
+    // session started last, which is how a running session's name changes under it.
+    resolvedInstanceId = instanceId || getInstanceIdForCwd(cwd) || undefined;
   }
 
   // Worktrees derive from the main repo's path; branch still comes from the
