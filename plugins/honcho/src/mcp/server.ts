@@ -38,6 +38,7 @@ import { validateRedactPattern } from "../redact.js";
 import { honchoSessionUrl } from "../styles.js";
 import {
   getLastActiveCwd,
+  loadIdCache,
   clearIdCache,
   clearPeerCache,
   clearUserContextOnly,
@@ -67,6 +68,34 @@ const SESSION_AFFECTING_FIELDS = new Set([
   "workspace", "aiPeer", "peerName", "sessionStrategy", "sessionPeerPrefix",
   "endpoint.environment", "endpoint.baseUrl", "globalOverride", "observationMode",
 ]);
+
+/**
+ * Resolve the project directory this MCP server belongs to.
+ *
+ * `getLastActiveCwd()` reads the machine-global `~/.honcho/cache.json` and answers with whichever
+ * session started most recently, anywhere on the machine — so consulting it first made every
+ * concurrent MCP server on the machine report the same directory. It remains a genuine fallback
+ * for an MCP server launched without any project dir, so it stays, but last.
+ *
+ * Order of preference:
+ *  1. the host's explicit project root, when the SessionStart hook has registered it — the host
+ *     states which project this server serves, and it lines up with `workspace_roots[0]`, the
+ *     first choice the write path uses for the cache key (`hooks/session-start.ts:63`);
+ *  2. this process's own cwd, when that is the registered key instead;
+ *  3. the host's project root even though nothing is registered for it yet — covers the first
+ *     session in a brand-new directory, and a SessionStart that failed before it could cache;
+ *  4. the machine-global most-recently-active cwd — the original documented fallback.
+ */
+function resolveProjectCwd(): string {
+  const sessions = loadIdCache().sessions ?? {};
+  const hostDir = process.env.CLAUDE_PROJECT_DIR || process.env.CURSOR_PROJECT_DIR;
+  const own = process.cwd();
+
+  if (hostDir && Object.hasOwn(sessions, hostDir)) return hostDir;
+  if (Object.hasOwn(sessions, own)) return own;
+  if (hostDir) return hostDir;
+  return getLastActiveCwd() ?? own;
+}
 
 // ============================================
 // get_config handler
@@ -694,7 +723,7 @@ function handleSetConfig(args: Record<string, unknown>) {
     : undefined;
 
   // Include session URL when session-affecting fields change
-  const cwd = getLastActiveCwd() || process.cwd();
+  const cwd = resolveProjectCwd();
   const newSessionName = SESSION_AFFECTING_FIELDS.has(field) ? getSessionName(cwd) : undefined;
   const sessionUrl = newSessionName ? honchoSessionUrl(cfg.workspace, newSessionName) : undefined;
 
@@ -1018,7 +1047,7 @@ export async function runMcpServer(): Promise<void> {
   // Handle tool calls
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
-    const cwd = getLastActiveCwd() || process.cwd();
+    const cwd = resolveProjectCwd();
 
     // ── Config tools (no Honcho session needed) ──
 
