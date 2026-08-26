@@ -77,8 +77,9 @@ export async function handleSessionStart(): Promise<void> {
   // Clear verbose log for fresh session
   clearVerboseLog();
 
-  // Reset message count for this session (for threshold-based knowledge graph refresh)
-  resetMessageCount();
+  // Reset this cwd's message count for the new session (per cwd, so a second
+  // window elsewhere neither suppresses nor replays the first-prompt banners).
+  resetMessageCount(cwd);
 
   // Capture git state (before any API calls for speed)
   const previousGitState = getCachedGitState(cwd);

@@ -177,8 +177,8 @@ export async function handleUserPrompt(): Promise<void> {
   // the write never blocks this turn's injection. This hook is read-only.
 
   // Track message count for threshold-based refresh
-  const messageCountBefore = getMessageCount();
-  incrementMessageCount();
+  const messageCountBefore = getMessageCount(cwd);
+  incrementMessageCount(cwd);
 
   // First prompt of the session: nudge the harness to actively call the honcho
   // MCP tools (search/chat/get_context) rather than rely only on this passive

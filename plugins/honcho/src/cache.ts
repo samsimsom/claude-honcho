@@ -1,6 +1,6 @@
 import { homedir } from "os";
 import { join } from "path";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, rmSync, statSync } from "fs";
 import { getContextRefreshConfig } from "./config.js";
 
 const CACHE_DIR = join(homedir(), ".honcho");
@@ -11,6 +11,72 @@ const CONTEXT_CACHE_FILE = join(CACHE_DIR, "context-cache.json");
 function ensureCacheDir(): void {
   if (!existsSync(CACHE_DIR)) {
     mkdirSync(CACHE_DIR, { recursive: true });
+  }
+}
+
+// ============================================
+// Concurrency: every file in ~/.honcho is shared by all sessions on this
+// machine, and each was updated with an unsynchronised load -> mutate -> write.
+// Measured 2026-08-26: 12 concurrent SessionStarts left 1 of 12 cwd entries;
+// even 2 lost 5 of 12 across six runs. A dropped entry is not cosmetic — it is
+// exactly the "cwd not registered" state that the MCP server's resolver has to
+// fall back from. Mutations now run under an exclusive lock and land via rename.
+// ============================================
+
+const LOCK_TIMEOUT_MS = 2000; // give up waiting and proceed unlocked (never block a hook)
+const LOCK_STALE_MS = 5000;   // a lock older than this belonged to a process that died
+
+function sleepSync(ms: number): void {
+  // Real sleep, not a spin: hooks are short-lived and must not burn CPU waiting.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Run `fn` while holding an exclusive lock on `file`. mkdir is atomic on POSIX,
+ * so it doubles as the mutex. If the lock cannot be taken within the timeout we
+ * run anyway — degrading to the old racy behaviour is strictly better than
+ * failing a hook or hanging a session start.
+ */
+function withCacheLock<T>(file: string, fn: () => T): T {
+  const lock = `${file}.lock`;
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  let held = false;
+  while (Date.now() < deadline) {
+    try {
+      mkdirSync(lock);
+      held = true;
+      break;
+    } catch {
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) {
+          rmSync(lock, { recursive: true, force: true });
+          continue; // retry immediately; whoever wins the next mkdir owns it
+        }
+      } catch {
+        continue; // lock vanished between the failed mkdir and the stat
+      }
+      sleepSync(5 + Math.floor(Math.random() * 10)); // jitter so waiters don't sync up
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    if (held) {
+      try { rmSync(lock, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  }
+}
+
+/** Write JSON so a reader never observes a half-written file. */
+function writeJsonAtomic(file: string, data: unknown): void {
+  ensureCacheDir();
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify(data, null, 2));
+    renameSync(tmp, file);
+  } catch {
+    try { rmSync(tmp, { force: true }); } catch { /* best effort */ }
+    throw new Error(`failed to write ${file}`);
   }
 }
 
@@ -37,8 +103,17 @@ export function loadIdCache(): IdCache {
 }
 
 export function saveIdCache(cache: IdCache): void {
-  ensureCacheDir();
-  writeFileSync(ID_CACHE_FILE, JSON.stringify(cache, null, 2));
+  writeJsonAtomic(ID_CACHE_FILE, cache);
+}
+
+/** Load, mutate and persist the ID cache as one locked step. */
+function updateIdCache<T>(mutate: (cache: IdCache) => T): T {
+  return withCacheLock(ID_CACHE_FILE, () => {
+    const cache = loadIdCache();
+    const result = mutate(cache);
+    saveIdCache(cache);
+    return result;
+  });
 }
 
 export function getCachedWorkspaceId(workspaceName: string): string | null {
@@ -50,9 +125,9 @@ export function getCachedWorkspaceId(workspaceName: string): string | null {
 }
 
 export function setCachedWorkspaceId(name: string, id: string): void {
-  const cache = loadIdCache();
-  cache.workspace = { name, id };
-  saveIdCache(cache);
+  updateIdCache((cache) => {
+    cache.workspace = { name, id };
+  });
 }
 
 export function getCachedPeerId(peerName: string): string | null {
@@ -61,10 +136,10 @@ export function getCachedPeerId(peerName: string): string | null {
 }
 
 export function setCachedPeerId(peerName: string, peerId: string): void {
-  const cache = loadIdCache();
-  if (!cache.peers) cache.peers = {};
-  cache.peers[peerName] = peerId;
-  saveIdCache(cache);
+  updateIdCache((cache) => {
+    if (!cache.peers) cache.peers = {};
+    cache.peers[peerName] = peerId;
+  });
 }
 
 export function getCachedSessionId(cwd: string): string | null {
@@ -73,10 +148,10 @@ export function getCachedSessionId(cwd: string): string | null {
 }
 
 export function setCachedSessionId(cwd: string, name: string, id: string, instanceId?: string): void {
-  const cache = loadIdCache();
-  if (!cache.sessions) cache.sessions = {};
-  cache.sessions[cwd] = { name, id, updatedAt: new Date().toISOString(), instanceId };
-  saveIdCache(cache);
+  updateIdCache((cache) => {
+    if (!cache.sessions) cache.sessions = {};
+    cache.sessions[cwd] = { name, id, updatedAt: new Date().toISOString(), instanceId };
+  });
 }
 
 /** Find the most recently active CWD from cached sessions (fallback for MCP servers without project dir) */
@@ -109,16 +184,16 @@ export function getInstanceIdForCwd(cwd: string): string | null {
  * during the window before setCachedSessionId() lands.
  */
 export function setInstanceIdForCwd(cwd: string, instanceId: string): void {
-  const cache = loadIdCache();
-  if (!cache.sessions) cache.sessions = {};
-  const existing = cache.sessions[cwd];
-  cache.sessions[cwd] = {
-    name: existing?.name ?? "",
-    id: existing?.id ?? "",
-    updatedAt: new Date().toISOString(),
-    instanceId,
-  };
-  saveIdCache(cache);
+  updateIdCache((cache) => {
+    if (!cache.sessions) cache.sessions = {};
+    const existing = cache.sessions[cwd];
+    cache.sessions[cwd] = {
+      name: existing?.name ?? "",
+      id: existing?.id ?? "",
+      updatedAt: new Date().toISOString(),
+      instanceId,
+    };
+  });
 }
 
 // ============================================
@@ -129,7 +204,7 @@ interface ContextCache {
   userContext?: { data: any; fetchedAt: number };
   claudeContext?: { data: any; fetchedAt: number };
   summaries?: { data: any; fetchedAt: number };
-  messageCount?: number; // Track messages since last refresh
+  messageCounts?: Record<string, number>; // cwd -> messages since that session started
 }
 
 // Now configurable via config.json, with defaults in getContextRefreshConfig()
@@ -139,8 +214,11 @@ function getContextTTL(): number {
 }
 
 // Known keys in ContextCache — anything else is a ghost from older versions
+// Anything outside this set is stripped on load as a ghost from an older
+// version — which is how the pre-2026-08-26 machine-global "messageCount"
+// integer removes itself once this build runs.
 const CONTEXT_CACHE_KNOWN_KEYS = new Set([
-  "claudeContext", "summaries", "messageCount",
+  "claudeContext", "summaries", "messageCounts",
 ]);
 
 export function loadContextCache(): ContextCache {
@@ -159,7 +237,7 @@ export function loadContextCache(): ContextCache {
       }
     }
     if (cleaned) {
-      writeFileSync(CONTEXT_CACHE_FILE, JSON.stringify(raw, null, 2));
+      writeJsonAtomic(CONTEXT_CACHE_FILE, raw);
     }
     return raw;
   } catch {
@@ -168,8 +246,17 @@ export function loadContextCache(): ContextCache {
 }
 
 export function saveContextCache(cache: ContextCache): void {
-  ensureCacheDir();
-  writeFileSync(CONTEXT_CACHE_FILE, JSON.stringify(cache, null, 2));
+  writeJsonAtomic(CONTEXT_CACHE_FILE, cache);
+}
+
+/** Load, mutate and persist the context cache as one locked step. */
+function updateContextCache<T>(mutate: (cache: ContextCache) => T): T {
+  return withCacheLock(CONTEXT_CACHE_FILE, () => {
+    const cache = loadContextCache();
+    const result = mutate(cache);
+    saveContextCache(cache);
+    return result;
+  });
 }
 
 export function getCachedClaudeContext(): any | null {
@@ -181,28 +268,32 @@ export function getCachedClaudeContext(): any | null {
 }
 
 export function setCachedClaudeContext(data: any): void {
-  const cache = loadContextCache();
-  cache.claudeContext = { data, fetchedAt: Date.now() };
-  saveContextCache(cache);
+  updateContextCache((cache) => {
+    cache.claudeContext = { data, fetchedAt: Date.now() };
+  });
 }
 
-// Track message count for threshold-based refresh
-export function incrementMessageCount(): number {
-  const cache = loadContextCache();
-  cache.messageCount = (cache.messageCount || 0) + 1;
-  saveContextCache(cache);
-  return cache.messageCount;
+// Messages seen in this cwd's session. Scoped per cwd: a single machine-wide
+// counter let a second window suppress the first-prompt hint of the first one
+// (its SessionStart reset the shared value) and replay it in a session that was
+// already several prompts in — both measured 2026-08-26.
+export function incrementMessageCount(cwd: string): number {
+  return updateContextCache((cache) => {
+    if (!cache.messageCounts) cache.messageCounts = {};
+    cache.messageCounts[cwd] = (cache.messageCounts[cwd] || 0) + 1;
+    return cache.messageCounts[cwd];
+  });
 }
 
-export function getMessageCount(): number {
-  const cache = loadContextCache();
-  return cache.messageCount || 0;
+export function getMessageCount(cwd: string): number {
+  return loadContextCache().messageCounts?.[cwd] || 0;
 }
 
-export function resetMessageCount(): void {
-  const cache = loadContextCache();
-  cache.messageCount = 0;
-  saveContextCache(cache);
+export function resetMessageCount(cwd: string): void {
+  updateContextCache((cache) => {
+    if (!cache.messageCounts) cache.messageCounts = {};
+    cache.messageCounts[cwd] = 0;
+  });
 }
 
 // ============================================
@@ -237,8 +328,17 @@ export function loadGitStateCache(): GitStateCache {
 }
 
 export function saveGitStateCache(cache: GitStateCache): void {
-  ensureCacheDir();
-  writeFileSync(GIT_STATE_FILE, JSON.stringify(cache, null, 2));
+  writeJsonAtomic(GIT_STATE_FILE, cache);
+}
+
+/** Load, mutate and persist the git-state cache as one locked step. */
+function updateGitStateCache<T>(mutate: (cache: GitStateCache) => T): T {
+  return withCacheLock(GIT_STATE_FILE, () => {
+    const cache = loadGitStateCache();
+    const result = mutate(cache);
+    saveGitStateCache(cache);
+    return result;
+  });
 }
 
 export function getCachedGitState(cwd: string): GitState | null {
@@ -247,9 +347,9 @@ export function getCachedGitState(cwd: string): GitState | null {
 }
 
 export function setCachedGitState(cwd: string, state: GitState): void {
-  const cache = loadGitStateCache();
-  cache[cwd] = state;
-  saveGitStateCache(cache);
+  updateGitStateCache((cache) => {
+    cache[cwd] = state;
+  });
 }
 
 export interface GitFeatureContext {
@@ -390,34 +490,33 @@ export async function addMessagesBatched(
 
 export function clearAllCaches(): void {
   ensureCacheDir();
-  if (existsSync(ID_CACHE_FILE)) writeFileSync(ID_CACHE_FILE, "{}");
-  if (existsSync(CONTEXT_CACHE_FILE)) writeFileSync(CONTEXT_CACHE_FILE, "{}");
-  if (existsSync(GIT_STATE_FILE)) writeFileSync(GIT_STATE_FILE, "{}");
+  for (const file of [ID_CACHE_FILE, CONTEXT_CACHE_FILE, GIT_STATE_FILE]) {
+    if (existsSync(file)) withCacheLock(file, () => writeJsonAtomic(file, {}));
+  }
 }
 
 /** Clear only the ID cache (workspace, peer, session IDs) */
 export function clearIdCache(): void {
-  ensureCacheDir();
-  writeFileSync(ID_CACHE_FILE, "{}");
+  withCacheLock(ID_CACHE_FILE, () => writeJsonAtomic(ID_CACHE_FILE, {}));
 }
 
 /** Clear only peer IDs from the ID cache */
 export function clearPeerCache(): void {
-  const cache = loadIdCache();
-  delete cache.peers;
-  saveIdCache(cache);
+  updateIdCache((cache) => {
+    delete cache.peers;
+  });
 }
 
 /** Clear only userContext from the context cache */
 export function clearUserContextOnly(): void {
-  const cache = loadContextCache();
-  delete cache.userContext;
-  saveContextCache(cache);
+  updateContextCache((cache) => {
+    delete cache.userContext;
+  });
 }
 
 /** Clear only claudeContext from the context cache */
 export function clearClaudeContextOnly(): void {
-  const cache = loadContextCache();
-  delete cache.claudeContext;
-  saveContextCache(cache);
+  updateContextCache((cache) => {
+    delete cache.claudeContext;
+  });
 }
