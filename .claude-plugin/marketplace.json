@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "LOCAL FORK \u2014 upstream honcho + message-upload redaction (PR #120)",
-    "version": "0.3.1-redact.10"
+    "version": "0.3.1-redact.11"
   },
   "plugins": [
     {
