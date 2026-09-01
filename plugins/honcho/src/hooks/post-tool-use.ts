@@ -226,7 +226,7 @@ export async function handlePostToolUse(): Promise<void> {
     config.redactPatterns
   );
   logHook("post-tool-use", summary, { tool: toolName });
-  visCapture(summary);
+  visCapture(summary, willUploadToolUse(config));
 
   // Upload to Honcho and wait for completion
   await logToHonchoAsync(config, cwd, summary, instanceId || undefined).catch((e) => logHook("post-tool-use", `Upload failed: ${e}`, { error: String(e) }));
@@ -234,9 +234,18 @@ export async function handlePostToolUse(): Promise<void> {
   process.exit(0);
 }
 
+/**
+ * The single source of truth for "will this tool call reach Honcho?".
+ * visCapture() and logToHonchoAsync() must never disagree — they did until
+ * 0.3.1-redact.12, and the display side was the one that lied.
+ */
+export function willUploadToolUse(config: any): boolean {
+  return config.saveMessages !== false && config.saveToolUse === true;
+}
+
 async function logToHonchoAsync(config: any, cwd: string, summary: string, instanceId?: string): Promise<void> {
   // Skip if message saving is disabled, or if [Tool] logging isn't opted in.
-  if (config.saveMessages === false || config.saveToolUse !== true) {
+  if (!willUploadToolUse(config)) {
     return;
   }
 

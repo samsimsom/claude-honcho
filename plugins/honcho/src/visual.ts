@@ -125,9 +125,16 @@ export function visComposedInjection(hookName: string, labels: string[]): string
 
 /**
  * Output tool capture as systemMessage (for post-tool-use — no existing stdout)
+ *
+ * `uploaded` must reflect the SAME gate logToHonchoAsync() applies. This line is
+ * printed before the upload is attempted, so with a bare "captured:" it kept
+ * announcing a write that saveMessages/saveToolUse had already suppressed — read
+ * during the 2026-09-01 audit as "writes are still happening" twice over.
+ * The label is the only signal a user gets here; it must not overstate.
  */
-export function visCapture(summary: string): void {
-  visMessage("out", "post-tool-use", `captured: ${summary}`);
+export function visCapture(summary: string, uploaded: boolean): void {
+  const label = uploaded ? "captured" : "captured (upload disabled)";
+  visMessage("out", "post-tool-use", `${label}: ${summary}`);
 }
 
 /**
