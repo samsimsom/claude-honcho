@@ -1,6 +1,6 @@
 {
   "name": "claude-honcho",
-  "version": "0.3.1-redact.6",
+  "version": "0.3.1-redact.7",
   "description": "Persistent memory for Claude Code sessions using Honcho by Plastic Labs",
   "type": "module",
   "keywords": [
